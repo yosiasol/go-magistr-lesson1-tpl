@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,151 +10,128 @@ import (
 )
 
 const (
-	statsURL       = "http://srv.msk01.gigacorp.local/_stats"
-	requestTimeout = 1 * time.Second
-	pollInterval   = 1 * time.Second
-	maxErrorCount  = 3
+	statsURL      = "http://srv.msk01.gigacorp.local/_stats"
+	pollInterval  = time.Second
+	requestTimout = time.Second
+	maxErrors     = 3
 )
 
 func main() {
 	client := &http.Client{
-		Timeout: requestTimeout,
+		Timeout: requestTimout,
 	}
 
 	errorCount := 0
 
 	for {
-		ok, err := pollServer(client)
-		if !ok || err != nil {
+		err := checkServerStats(client)
+		if err != nil {
+			// Ошибка получения или парсинга данных
 			errorCount++
+			if errorCount >= maxErrors {
+				fmt.Println("Unable to fetch server statistic")
+			}
 		} else {
-			// при успешном запросе сбрасываем счётчик ошибок
+			// Успешный запрос сбрасывает счётчик ошибок
 			errorCount = 0
-		}
-
-		if errorCount >= maxErrorCount {
-			fmt.Println("Unable to fetch server statistic")
 		}
 
 		time.Sleep(pollInterval)
 	}
 }
 
-// pollServer делает один запрос к серверу, парсит ответ и при необходимости выводит алерты.
-func pollServer(client *http.Client) (bool, error) {
-	req, err := http.NewRequest(http.MethodGet, statsURL, nil)
+func checkServerStats(client *http.Client) error {
+	resp, err := client.Get(statsURL)
 	if err != nil {
-		return false, err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// статус не 200 – считаем, что статистика недоступна
-		return false, nil
+		return fmt.Errorf("unexpected status: %s", resp.Status)
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	if !scanner.Scan() {
-		// пустой ответ
-		return false, nil
-	}
-	line := strings.TrimSpace(scanner.Text())
-	if line == "" {
-		return false, nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
 	}
 
-	parts := strings.Split(line, ",")
-	if len(parts) != 7 {
-		// формат данных не соответствует ожидаемому
-		return false, nil
+	values := strings.Split(strings.TrimSpace(string(body)), ",")
+	if len(values) != 7 {
+		return fmt.Errorf("unexpected values count: %d", len(values))
 	}
 
-	parse := func(s string) (float64, bool) {
-		val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-		if err != nil {
-			return 0, false
-		}
-		return val, true
+	parse := func(s string) (float64, error) {
+		return strconv.ParseFloat(strings.TrimSpace(s), 64)
 	}
 
-	loadAvg, ok := parse(parts[0])
-	if !ok {
-		return false, nil
+	loadAvg, err := parse(values[0])
+	if err != nil {
+		return err
 	}
-
-	memTotal, ok := parse(parts[1])
-	if !ok {
-		return false, nil
+	memTotal, err := parse(values[1])
+	if err != nil {
+		return err
 	}
-	memUsed, ok := parse(parts[2])
-	if !ok {
-		return false, nil
+	memUsed, err := parse(values[2])
+	if err != nil {
+		return err
 	}
-
-	diskTotal, ok := parse(parts[3])
-	if !ok {
-		return false, nil
+	diskTotal, err := parse(values[3])
+	if err != nil {
+		return err
 	}
-	diskUsed, ok := parse(parts[4])
-	if !ok {
-		return false, nil
+	diskUsed, err := parse(values[4])
+	if err != nil {
+		return err
 	}
-
-	netBandwidth, ok := parse(parts[5])
-	if !ok {
-		return false, nil
+	netTotal, err := parse(values[5])
+	if err != nil {
+		return err
 	}
-	netUsage, ok := parse(parts[6])
-	if !ok {
-		return false, nil
+	netUsed, err := parse(values[6])
+	if err != nil {
+		return err
 	}
 
 	// 1. Load Average
 	if loadAvg > 30 {
-		// выводим исходное текстовое значение, как в ответе
-		fmt.Printf("Load Average is too high: %s\n", strings.TrimSpace(parts[0]))
+		fmt.Printf("Load Average is too high: %d\n", int(loadAvg))
 	}
 
-	// 2. Память: > 80% от общего объёма
+	// 2. Память: если > 80% (строго), печатаем целый процент, усечённый вниз
 	if memTotal > 0 {
-		memPercent := memUsed * 100 / memTotal
-		if memPercent > 80 {
-			fmt.Printf("Memory usage too high: %.0f%%\n", memPercent)
+		memUsage := memUsed / memTotal * 100
+		if memUsage > 80 {
+			fmt.Printf("Memory usage too high: %d%%\n", int(memUsage))
 		}
 	}
 
-	// 3. Диск: > 90% занятого пространства
+	// 3. Диск: если занято > 90%, печатаем свободное место в мегабайтах (floor)
 	if diskTotal > 0 {
-		diskPercent := diskUsed * 100 / diskTotal
-		if diskPercent > 90 {
+		diskUsedPct := diskUsed / diskTotal * 100
+		if diskUsedPct > 90 {
 			freeBytes := diskTotal - diskUsed
 			if freeBytes < 0 {
 				freeBytes = 0
 			}
-			// байты -> мегабайты, целочисленное деление (отбрасываем дробную часть)
-			freeMB := int64(freeBytes / (1024 * 1024))
-			fmt.Printf("Free disk space is too low: %d Mb left\n", freeMB)
+			freeMB := freeBytes / 1024 / 1024
+			fmt.Printf("Free disk space is too low: %d Mb left\n", int(freeMB))
 		}
 	}
 
-	// 4. Сеть: > 90% занятой полосы
-	if netBandwidth > 0 {
-		netPercent := netUsage * 100 / netBandwidth
-		if netPercent > 90 {
-			freeBytesPerSec := netBandwidth - netUsage
-			if freeBytesPerSec < 0 {
-				freeBytesPerSec = 0
+	// 4. Сеть: если занято > 90%, печатаем свободную полосу в мегабитах/сек (floor)
+	if netTotal > 0 {
+		netUsedPct := netUsed / netTotal * 100
+		if netUsedPct > 90 {
+			freeNet := netTotal - netUsed
+			if freeNet < 0 {
+				freeNet = 0
 			}
-			// свободная полоса в "мегабайтах" в секунду (делим только на 1_000_000)
-			freeM := int64(freeBytesPerSec / 1_000_000)
-			fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", freeM)
+			freeMbit := freeNet / 1_000_000.0
+			fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", int(freeMbit))
 		}
 	}
 
-	return true, nil
+	return nil
 }
