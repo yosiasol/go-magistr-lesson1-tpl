@@ -149,6 +149,7 @@ func pollServer(client *http.Client) (ok bool, err error) {
 
 // mustParseFloat парсит число в формате float64.
 // Возвращает false при ошибке парсинга.
+// заменили версию
 func mustParseFloat(s string) (float64, bool) {
 	s = strings.TrimSpace(s)
 	v, err := strconv.ParseFloat(s, 64)
