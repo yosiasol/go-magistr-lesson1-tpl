@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,16 +10,10 @@ import (
 )
 
 const (
-	statsURL            = "http://srv.msk01.gigacorp.local/_stats"
-	loadAvgThreshold    = 30.0  // Load Average > 30
-	memUsageThreshold   = 80.0  // Память > 80% от доступной
-	diskUsageThreshold  = 90.0  // Диск > 90% от доступного
-	netUsageThreshold   = 90.0  // Сеть > 90% от полосы
-	freeDiskDivisorMB   = 1024 * 1024 // байт в мегабайте
-	freeNetworkDivisor  = 1_000_000   // байт в "десятичном" мегабите
-	requestTimeout      = 5 * time.Second
-	pollInterval        = 1 * time.Second
-	minErrorsForMessage = 3
+	statsURL       = "http://srv.msk01.gigacorp.local/_stats"
+	requestTimeout = 1 * time.Second
+	pollInterval   = 1 * time.Second
+	maxErrorCount  = 3
 )
 
 func main() {
@@ -30,136 +24,136 @@ func main() {
 	errorCount := 0
 
 	for {
-		ok := pollOnce(client)
-		if ok {
-			// Успешный запрос сбрасывает счетчик ошибок
-			errorCount = 0
-		} else {
-			// Ошибка получения/разбора статистики
+		ok, err := pollServer(client)
+		if !ok || err != nil {
 			errorCount++
-			if errorCount >= minErrorsForMessage {
-				fmt.Println("Unable to fetch server statistic")
-			}
+		} else {
+			// при успешном запросе сбрасываем счетчик ошибок
+			errorCount = 0
+		}
+
+		if errorCount >= maxErrorCount {
+			fmt.Println("Unable to fetch server statistic")
 		}
 
 		time.Sleep(pollInterval)
 	}
 }
 
-// pollOnce выполняет один запрос к серверу статистики.
-// Возвращает true, если данные успешно получены и обработаны.
-// Возвращает false при любой сетевой ошибке, неверном статусе или формате данных.
-func pollOnce(client *http.Client) bool {
-	resp, err := client.Get(statsURL)
+// pollServer делает один запрос к серверу, парсит ответ и при необходимости выводит алерты.
+// Возвращает:
+//
+//	ok == true  если данные успешно получены и распарсены;
+//	ok == false если статус не 200 или формат данных неверный;
+//	err != nil  если была сетевая или иная техническая ошибка.
+func pollServer(client *http.Client) (ok bool, err error) {
+	req, err := http.NewRequest(http.MethodGet, statsURL, nil)
 	if err != nil {
-		return false
+		return false, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return false, nil
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false
+	scanner := bufio.NewScanner(resp.Body)
+	if !scanner.Scan() {
+		return false, nil
 	}
-
-	line := strings.TrimSpace(string(body))
+	line := strings.TrimSpace(scanner.Text())
 	if line == "" {
-		return false
+		return false, nil
 	}
 
 	parts := strings.Split(line, ",")
 	if len(parts) != 7 {
-		// Формат не соответствует ожидаемому
-		return false
+		return false, nil
 	}
 
-	parse := func(s string) (float64, bool) {
-		v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-		if err != nil {
-			return 0, false
-		}
-		return v, true
-	}
-
-	loadAvg, ok := parse(parts[0])
+	// парсим числа
+	loadAvg, ok := mustParseFloat(parts[0])
 	if !ok {
-		return false
+		return false, nil
 	}
 
-	totalMem, ok := parse(parts[1])
+	memTotal, ok := mustParseFloat(parts[1])
 	if !ok {
-		return false
+		return false, nil
+	}
+	memUsed, ok := mustParseFloat(parts[2])
+	if !ok {
+		return false, nil
 	}
 
-	usedMem, ok := parse(parts[2])
+	diskTotal, ok := mustParseFloat(parts[3])
 	if !ok {
-		return false
+		return false, nil
+	}
+	diskUsed, ok := mustParseFloat(parts[4])
+	if !ok {
+		return false, nil
 	}
 
-	totalDisk, ok := parse(parts[3])
+	netBandwidth, ok := mustParseFloat(parts[5])
 	if !ok {
-		return false
+		return false, nil
 	}
-
-	usedDisk, ok := parse(parts[4])
+	netUsage, ok := mustParseFloat(parts[6])
 	if !ok {
-		return false
-	}
-
-	netBandwidth, ok := parse(parts[5])
-	if !ok {
-		return false
-	}
-
-	netUsage, ok := parse(parts[6])
-	if !ok {
-		return false
+		return false, nil
 	}
 
 	// 1. Load Average
-	if loadAvg > loadAvgThreshold {
-		// Выводим целое значение, как в условии
-		fmt.Printf("Load Average is too high: %.0f\n", loadAvg)
+	if loadAvg > 30 {
+		// печатаем исходное текстовое значение, как пришло с сервера
+		fmt.Printf("Load Average is too high: %s\n", strings.TrimSpace(parts[0]))
 	}
 
 	// 2. Память
-	if totalMem > 0 {
-		memUsagePercent := usedMem * 100 / totalMem
-		if memUsagePercent > memUsageThreshold {
-			fmt.Printf("Memory usage too high: %d%%\n", int(memUsagePercent))
+	if memTotal > 0 {
+		memPercent := memUsed / memTotal * 100
+		if memPercent > 80 {
+			fmt.Printf("Memory usage too high: %.0f%%\n", memPercent)
 		}
 	}
 
 	// 3. Диск
-	if totalDisk > 0 {
-		diskUsagePercent := usedDisk * 100 / totalDisk
-		if diskUsagePercent > diskUsageThreshold {
-			freeBytes := totalDisk - usedDisk
-			if freeBytes < 0 {
-				freeBytes = 0
-			}
-			freeMB := int(freeBytes / freeDiskDivisorMB)
-			fmt.Printf("Free disk space is too low: %d Mb left\n", freeMB)
+	if diskTotal > 0 {
+		diskPercent := diskUsed / diskTotal * 100
+		if diskPercent > 90 {
+			freeBytes := diskTotal - diskUsed
+			freeMB := freeBytes / (1024 * 1024)
+			fmt.Printf("Free disk space is too low: %.0f Mb left\n", freeMB)
 		}
 	}
 
 	// 4. Сеть
 	if netBandwidth > 0 {
-		netUsagePercent := netUsage * 100 / netBandwidth
-		if netUsagePercent > netUsageThreshold {
+		netPercent := netUsage / netBandwidth * 100
+		if netPercent > 90 {
 			freeBytesPerSec := netBandwidth - netUsage
-			if freeBytesPerSec < 0 {
-				freeBytesPerSec = 0
-			}
-			// Переводим байты в секунду в мегабиты в секунду:
-			// байты * 8 / 1_000_000
-			freeMbitPerSec := int(freeBytesPerSec * 8 / freeNetworkDivisor)
-			fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", freeMbitPerSec)
+			// байты в секунду -> мегабиты в секунду
+			freeMbitPerSec := freeBytesPerSec * 8 / (1024 * 1024)
+			fmt.Printf("Network bandwidth usage high: %.0f Mbit/s available\n", freeMbitPerSec)
 		}
 	}
 
-	return true
+	return true, nil
+}
+
+// mustParseFloat парсит число в формате float64.
+// Возвращает false при ошибке парсинга.
+func mustParseFloat(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
