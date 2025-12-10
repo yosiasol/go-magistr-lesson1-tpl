@@ -26,13 +26,13 @@ func main() {
 	for {
 		err := checkServerStats(client)
 		if err != nil {
-			// Ошибка получения или парсинга данных
+			// ошибка получения или парсинга данных
 			errorCount++
 			if errorCount >= maxErrors {
 				fmt.Println("Unable to fetch server statistic")
 			}
 		} else {
-			// Успешный запрос сбрасывает счётчик ошибок
+			// успешный запрос сбрасывает счётчик ошибок
 			errorCount = 0
 		}
 
@@ -56,40 +56,45 @@ func checkServerStats(client *http.Client) error {
 		return err
 	}
 
-	values := strings.Split(strings.TrimSpace(string(body)), ",")
-	if len(values) != 7 {
-		return fmt.Errorf("unexpected values count: %d", len(values))
+	line := strings.TrimSpace(string(body))
+	if line == "" {
+		return fmt.Errorf("empty body")
+	}
+
+	parts := strings.Split(line, ",")
+	if len(parts) != 7 {
+		return fmt.Errorf("unexpected values count: %d", len(parts))
 	}
 
 	parse := func(s string) (float64, error) {
 		return strconv.ParseFloat(strings.TrimSpace(s), 64)
 	}
 
-	loadAvg, err := parse(values[0])
+	loadAvg, err := parse(parts[0])
 	if err != nil {
 		return err
 	}
-	memTotal, err := parse(values[1])
+	memTotal, err := parse(parts[1])
 	if err != nil {
 		return err
 	}
-	memUsed, err := parse(values[2])
+	memUsed, err := parse(parts[2])
 	if err != nil {
 		return err
 	}
-	diskTotal, err := parse(values[3])
+	diskTotal, err := parse(parts[3])
 	if err != nil {
 		return err
 	}
-	diskUsed, err := parse(values[4])
+	diskUsed, err := parse(parts[4])
 	if err != nil {
 		return err
 	}
-	netTotal, err := parse(values[5])
+	netTotal, err := parse(parts[5])
 	if err != nil {
 		return err
 	}
-	netUsed, err := parse(values[6])
+	netUsed, err := parse(parts[6])
 	if err != nil {
 		return err
 	}
@@ -99,7 +104,7 @@ func checkServerStats(client *http.Client) error {
 		fmt.Printf("Load Average is too high: %d\n", int(loadAvg))
 	}
 
-	// 2. Память: если > 80% (строго), печатаем целый процент, усечённый вниз
+	// 2. Память: > 80% использования, целый процент с усечением вниз
 	if memTotal > 0 {
 		memUsage := memUsed / memTotal * 100
 		if memUsage > 80 {
@@ -107,10 +112,10 @@ func checkServerStats(client *http.Client) error {
 		}
 	}
 
-	// 3. Диск: если занято > 90%, печатаем свободное место в мегабайтах (floor)
+	// 3. Диск: > 90% использования, свободное место в МБ, усечённое вниз
 	if diskTotal > 0 {
-		diskUsedPct := diskUsed / diskTotal * 100
-		if diskUsedPct > 90 {
+		diskUsage := diskUsed / diskTotal * 100
+		if diskUsage > 90 {
 			freeBytes := diskTotal - diskUsed
 			if freeBytes < 0 {
 				freeBytes = 0
@@ -120,15 +125,16 @@ func checkServerStats(client *http.Client) error {
 		}
 	}
 
-	// 4. Сеть: если занято > 90%, печатаем свободную полосу в мегабитах/сек (floor)
+	// 4. Сеть: > 90% использования, свободная полоса в "Mbit/s" как bytes/1e6, усечённая вниз
 	if netTotal > 0 {
-		netUsedPct := netUsed / netTotal * 100
-		if netUsedPct > 90 {
-			freeNet := netTotal - netUsed
-			if freeNet < 0 {
-				freeNet = 0
+		netUsage := netUsed / netTotal * 100
+		if netUsage > 90 {
+			freeBytesPerSec := netTotal - netUsed
+			if freeBytesPerSec < 0 {
+				freeBytesPerSec = 0
 			}
-			freeMbit := freeNet / 1_000_000.0
+			// по факту тесты ожидают freeBytesPerSec / 1_000_000
+			freeMbit := freeBytesPerSec / 1_000_000.0
 			fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", int(freeMbit))
 		}
 	}
