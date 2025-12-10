@@ -28,7 +28,7 @@ func main() {
 		if !ok || err != nil {
 			errorCount++
 		} else {
-			// при успешном запросе сбрасываем счетчик ошибок
+			// при успешном запросе сбрасываем счётчик ошибок
 			errorCount = 0
 		}
 
@@ -41,12 +41,7 @@ func main() {
 }
 
 // pollServer делает один запрос к серверу, парсит ответ и при необходимости выводит алерты.
-// Возвращает:
-//
-//	ok == true  если данные успешно получены и распарсены;
-//	ok == false если статус не 200 или формат данных неверный;
-//	err != nil  если была сетевая или иная техническая ошибка.
-func pollServer(client *http.Client) (ok bool, err error) {
+func pollServer(client *http.Client) (bool, error) {
 	req, err := http.NewRequest(http.MethodGet, statsURL, nil)
 	if err != nil {
 		return false, err
@@ -59,11 +54,13 @@ func pollServer(client *http.Client) (ok bool, err error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// статус не 200 – считаем, что статистика недоступна
 		return false, nil
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	if !scanner.Scan() {
+		// пустой ответ
 		return false, nil
 	}
 	line := strings.TrimSpace(scanner.Text())
@@ -73,88 +70,91 @@ func pollServer(client *http.Client) (ok bool, err error) {
 
 	parts := strings.Split(line, ",")
 	if len(parts) != 7 {
+		// формат данных не соответствует ожидаемому
 		return false, nil
 	}
 
-	// парсим числа
-	loadAvg, ok := mustParseFloat(parts[0])
-	if !ok {
-		return false, nil
+	parse := func(s string) (float64, bool) {
+		val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil {
+			return 0, false
+		}
+		return val, true
 	}
 
-	memTotal, ok := mustParseFloat(parts[1])
-	if !ok {
-		return false, nil
-	}
-	memUsed, ok := mustParseFloat(parts[2])
-	if !ok {
-		return false, nil
-	}
-
-	diskTotal, ok := mustParseFloat(parts[3])
-	if !ok {
-		return false, nil
-	}
-	diskUsed, ok := mustParseFloat(parts[4])
+	loadAvg, ok := parse(parts[0])
 	if !ok {
 		return false, nil
 	}
 
-	netBandwidth, ok := mustParseFloat(parts[5])
+	memTotal, ok := parse(parts[1])
 	if !ok {
 		return false, nil
 	}
-	netUsage, ok := mustParseFloat(parts[6])
+	memUsed, ok := parse(parts[2])
+	if !ok {
+		return false, nil
+	}
+
+	diskTotal, ok := parse(parts[3])
+	if !ok {
+		return false, nil
+	}
+	diskUsed, ok := parse(parts[4])
+	if !ok {
+		return false, nil
+	}
+
+	netBandwidth, ok := parse(parts[5])
+	if !ok {
+		return false, nil
+	}
+	netUsage, ok := parse(parts[6])
 	if !ok {
 		return false, nil
 	}
 
 	// 1. Load Average
 	if loadAvg > 30 {
-		// печатаем исходное текстовое значение, как пришло с сервера
+		// выводим исходное текстовое значение, как в ответе
 		fmt.Printf("Load Average is too high: %s\n", strings.TrimSpace(parts[0]))
 	}
 
-	// 2. Память
+	// 2. Память: > 80% от общего объёма
 	if memTotal > 0 {
-		memPercent := memUsed / memTotal * 100
+		memPercent := memUsed * 100 / memTotal
 		if memPercent > 80 {
 			fmt.Printf("Memory usage too high: %.0f%%\n", memPercent)
 		}
 	}
 
-	// 3. Диск
+	// 3. Диск: > 90% занятого пространства
 	if diskTotal > 0 {
-		diskPercent := diskUsed / diskTotal * 100
+		diskPercent := diskUsed * 100 / diskTotal
 		if diskPercent > 90 {
 			freeBytes := diskTotal - diskUsed
-			freeMB := freeBytes / (1024 * 1024)
-			fmt.Printf("Free disk space is too low: %.0f Mb left\n", freeMB)
+			if freeBytes < 0 {
+				freeBytes = 0
+			}
+			// байты -> мегабайты, целочисленное деление (отбрасываем дробную часть)
+			freeMB := int64(freeBytes / (1024 * 1024))
+			fmt.Printf("Free disk space is too low: %d Mb left\n", freeMB)
 		}
 	}
 
-	// 4. Сеть
+	// 4. Сеть: > 90% занятой полосы
 	if netBandwidth > 0 {
-		netPercent := netUsage / netBandwidth * 100
+		netPercent := netUsage * 100 / netBandwidth
 		if netPercent > 90 {
 			freeBytesPerSec := netBandwidth - netUsage
-			// байты в секунду -> мегабиты в секунду
-			freeMbitPerSec := freeBytesPerSec * 8 / (1024 * 1024)
-			fmt.Printf("Network bandwidth usage high: %.0f Mbit/s available\n", freeMbitPerSec)
+			if freeBytesPerSec < 0 {
+				freeBytesPerSec = 0
+			}
+			// свободная полоса в "мегабайтах" в секунду (делим только на 1_000_000)
+			freeM := int64(freeBytesPerSec / 1_000_000)
+			fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", freeM)
 		}
 	}
 
 	return true, nil
-}
-
-// mustParseFloat парсит число в формате float64.
-// Возвращает false при ошибке парсинга.
-// заменили версию
-func mustParseFloat(s string) (float64, bool) {
-	s = strings.TrimSpace(s)
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
 }
